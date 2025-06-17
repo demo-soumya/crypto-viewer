@@ -1,0 +1,125 @@
+pipeline {
+    //Specify the agent to run the pipeline on
+    agent  {label 'slave'}
+    environment {
+        // Define environment variables
+        DOCKER_HUB_CREDENTIALS = 'docker-hub-credentials'
+        SPRING_APP_IMAGE = "demo-soumya/crypto-viewer"
+        SONARQUBE_ENV = 'SonarQube'
+        DATE = "${new Date().format('yyyy-MM-dd')}"
+        TIME = "${new Date().format('HH:mm:ss')}"
+    }
+    //Jenkins file is under the project directory then why are we cloning the repository again?
+    stages {
+        stage('Clone Repository from Git') {
+            steps {
+                echo 'Cloning repository from Git...'
+                git branch : 'main', url: 'https://github.com/demo-soumya/crypto-viewer.git'
+                script {
+                    echo  'Repository cloned successfully!'
+                    //Setting up the image tag from the last commit ID
+                    env.IMAGE_TAG = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    echo "Image tag set to: ${env.IMAGE_TAG}"
+                }
+            }
+        }
+        stage('Build using Maven') {
+            steps {
+                echo 'Building the application...'
+                sh 'mvn clean package -DskipTests'
+                echo 'Build completed successfully!'
+            }
+        }
+        stage('Running Tests') {
+            steps {
+                echo 'Running tests...'
+                sh 'mvn test'
+                echo 'Tests completed successfully!'
+                // Where will it go if the tests fail?
+            }
+        }
+        stage('SonarQube Analysis') {
+            steps {
+                echo 'Starting SonarQube analysis...'
+                withCredentials([string(credentialsId: SONARQUBE_ENV, variable: 'SONAR_TOKEN')]) {
+                    sh "mvn sonar:sonar -Dsonar.projectKey=crypto-viewer -Dsonar.host.url=http://localhost:9000 -Dsonar.login=${SONAR_TOKEN}"
+                    //where will i save my sonar token?
+                }
+                echo 'SonarQube analysis completed successfully!'
+            }
+        }
+        stage('Build Docker Image') {
+            steps {
+                parallel {
+                    stage('Build Docker APP Image') {
+                        steps {
+                            echo 'Building Docker APP image...'
+                            sh 'docker build -t ${SPRING_APP_IMAGE}:${env.IMAGE_TAG} .'
+                            echo 'Docker APP image built successfully!'
+                        }
+                    }
+                    stage('Build Docker DB Image') {
+                        steps {
+                            echo 'Building Docker DB image...'
+                            sh """
+                                docker pull postgres:latest
+                                docker tag postgres:latest ${POSTGRES_IMAGE}:${DOCKER_IMAGE_TAG}
+                            """
+                            echo 'Docker DB image built successfully!'
+                        }
+                    }
+
+                }
+            }
+        }
+        stage('Logging in to docker hub') {
+            steps {
+                echo 'Logging in to Docker Hub...'
+                withCredentials([usernamePassword(credentialsId: DOCKER_HUB_CREDENTIALS, usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                    sh "echo ${DOCKER_PASSWORD} | docker login -u ${DOCKER_USERNAME} --password-stdin"
+                }
+                echo 'Logged in to Docker Hub successfully!'
+            }
+        }
+        stage('Pushing Docker Image') {
+            steps {
+                echo 'Pushing Docker image to Docker Hub...'
+                sh "docker push ${SPRING_APP_IMAGE}:${env.IMAGE_TAG}"
+                echo 'Docker image pushed successfully!'
+            }
+        }
+        stage('Deploy to Kubernetes') {
+            steps {
+                echo 'Deploying to Kubernetes...'
+                sh "kubectl apply -f app-deployment.yaml"
+                echo 'Deployment to Kubernetes completed successfully!'
+            }
+        }
+        stage('verify deployment') {
+            steps {
+                echo 'Verifying deployment...'
+                sh "kubectl rollout status deployment/crypto-viewer"
+                echo 'Deployment verified successfully!'
+            }
+        }
+        stage(Archive Artifacts) {
+            steps {
+                echo 'Archiving artifacts...'
+                archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
+                echo 'Artifacts archived successfully!'
+            }
+        }
+    }
+    post {
+        success {
+            mail to: 'soumya.kanti-st@adityabirla.com',
+                 subject: "Jenkins Pipeline Success - Build #${env.BUILD_NUMBER}: ${DATE} ${TIME}",
+                 body: "The pipeline for ${env.BUILD_NUMBER} was successful."
+        }
+        failure {
+            mail to: 'soumya.kanti-st@adityabirla.com',
+                 subject: "Jenkins Pipeline Failure - Build #${env.BUILD_NUMBER}: ${DATE} ${TIME}",
+                 body: "The pipeline for ${env.BUILD_NUMBER} failed."
+        }
+    }
+}
